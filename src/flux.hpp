@@ -886,7 +886,9 @@ namespace Flux {
                                   ggml_tensor* guidance,
                                   ggml_tensor* pe,
                                   ggml_tensor* mod_index_arange = nullptr,
-                                  std::vector<int> skip_layers  = {}) {
+                                  std::vector<int> skip_layers  = {},
+                                  ggml_tensor* pulid_id         = nullptr,
+                                  float        pulid_id_weight  = 1.0f) {
             auto img_in      = std::dynamic_pointer_cast<Linear>(blocks["img_in"]);
             auto txt_in      = std::dynamic_pointer_cast<Linear>(blocks["txt_in"]);
             auto final_layer = std::dynamic_pointer_cast<LastLayer>(blocks["final_layer"]);
@@ -963,6 +965,14 @@ namespace Flux {
             sd::ggml_graph_cut::mark_graph_cut(txt, "flux.prelude", "txt");
             sd::ggml_graph_cut::mark_graph_cut(vec, "flux.prelude", "vec");
 
+            // PuLID identity injection: mirrors ToTheBeginning/PuLID
+            // pulid/encoders_transformer.py + flux/model.py. The CA layers
+            // run *between* transformer blocks, with their output added to
+            // img (scaled by id_weight) at every `pulid_double_interval`-th
+            // double_block and every `pulid_single_interval`-th single_block.
+            const bool pulid_active = params.pulid_enabled && pulid_id != nullptr;
+            int        ca_idx       = 0;
+
             for (int i = 0; i < params.depth; i++) {
                 if (skip_layers.size() > 0 && std::find(skip_layers.begin(), skip_layers.end(), i) != skip_layers.end()) {
                     continue;
@@ -975,9 +985,19 @@ namespace Flux {
                 txt          = img_txt.second;  // [N, n_txt_token, hidden_size]
                 sd::ggml_graph_cut::mark_graph_cut(img, "flux.double_blocks." + std::to_string(i), "img");
                 sd::ggml_graph_cut::mark_graph_cut(txt, "flux.double_blocks." + std::to_string(i), "txt");
+
+                if (pulid_active && (i % params.pulid_double_interval == 0)) {
+                    auto pulid_ca = std::dynamic_pointer_cast<PuLIDPerceiverAttentionCA>(
+                        blocks["pulid_ca." + std::to_string(ca_idx)]);
+                    ggml_tensor* ca_out = pulid_ca->forward(ctx, pulid_id, img);   // [N, n_img_token, hidden_size]
+                    img = ggml_add(ctx->ggml_ctx, img, ggml_scale(ctx->ggml_ctx, ca_out, pulid_id_weight));
+                    sd::ggml_graph_cut::mark_graph_cut(img, "flux.pulid_ca." + std::to_string(ca_idx), "img");
+                    ca_idx++;
+                }
             }
 
             auto txt_img = ggml_concat(ctx->ggml_ctx, txt, img, 1);  // [N, n_txt_token + n_img_token, hidden_size]
+            const int64_t n_txt_tok = txt->ne[1];                     // for splitting back into img portion below
             for (int i = 0; i < params.depth_single_blocks; i++) {
                 if (skip_layers.size() > 0 && std::find(skip_layers.begin(), skip_layers.end(), i + params.depth) != skip_layers.end()) {
                     continue;
@@ -986,6 +1006,31 @@ namespace Flux {
 
                 txt_img = block->forward(ctx, txt_img, vec, pe, txt_img_mask, ss_mods);
                 sd::ggml_graph_cut::mark_graph_cut(txt_img, "flux.single_blocks." + std::to_string(i), "txt_img");
+
+                if (pulid_active && (i % params.pulid_single_interval == 0)) {
+                    auto pulid_ca = std::dynamic_pointer_cast<PuLIDPerceiverAttentionCA>(
+                        blocks["pulid_ca." + std::to_string(ca_idx)]);
+                    // Split txt_img into [txt | img], inject ID into the img portion
+                    // only, then concatenate back. Matches the PyTorch reference.
+                    ggml_tensor* txt_part = ggml_view_3d(ctx->ggml_ctx, txt_img,
+                                                          txt_img->ne[0], n_txt_tok, txt_img->ne[2],
+                                                          txt_img->nb[1], txt_img->nb[2],
+                                                          0);
+                    ggml_tensor* img_part = ggml_view_3d(ctx->ggml_ctx, txt_img,
+                                                          txt_img->ne[0],
+                                                          txt_img->ne[1] - n_txt_tok,
+                                                          txt_img->ne[2],
+                                                          txt_img->nb[1],
+                                                          txt_img->nb[2],
+                                                          n_txt_tok * txt_img->nb[1]);
+                    txt_part = ggml_cont(ctx->ggml_ctx, txt_part);
+                    img_part = ggml_cont(ctx->ggml_ctx, img_part);
+                    ggml_tensor* ca_out = pulid_ca->forward(ctx, pulid_id, img_part);
+                    img_part = ggml_add(ctx->ggml_ctx, img_part, ggml_scale(ctx->ggml_ctx, ca_out, pulid_id_weight));
+                    txt_img = ggml_concat(ctx->ggml_ctx, txt_part, img_part, 1);
+                    sd::ggml_graph_cut::mark_graph_cut(txt_img, "flux.pulid_ca." + std::to_string(ca_idx), "txt_img");
+                    ca_idx++;
+                }
             }
 
             img = ggml_view_3d(ctx->ggml_ctx,
