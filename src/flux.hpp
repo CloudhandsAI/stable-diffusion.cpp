@@ -1308,6 +1308,14 @@ namespace Flux {
                 if (ends_with(tensor_name, "double_blocks.0.txt_attn.norm.key_norm.scale")) {
                     head_dim = pair.second.ne[0];
                 }
+                // PuLID weights live alongside the diffusion model under the same
+                // prefix ("model.diffusion_model.pulid_ca.<i>.<sub>") when the
+                // pulid loader merges them in (see stable-diffusion.cpp). Spotting
+                // any pulid_ca.* key here flips the architecture flag so the Flux
+                // ctor registers the corresponding pulid_ca.<i> child blocks.
+                if (tensor_name.find("pulid_ca.") != std::string::npos) {
+                    flux_params.pulid_enabled = true;
+                }
             }
             if (actual_radiance_patch_size > 0 && actual_radiance_patch_size != flux_params.patch_size) {
                 GGML_ASSERT(flux_params.patch_size == 2 * actual_radiance_patch_size);

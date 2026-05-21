@@ -303,10 +303,17 @@ public:
         }
 
         if (strlen(SAFE_STR(sd_ctx_params->pulid_weights_path)) > 0) {
-            LOG_INFO("PuLID weights declared at '%s' (loader + injection: pending)", sd_ctx_params->pulid_weights_path);
-            // TODO(cloudhands): wire PuLID cross-attention weights into the flux runner.
-            // This is milestone 4 of the PuLID-in-sd.cpp port; for now we only ack the
-            // path so the CLI flag plumbing is testable. See cloudhands/pulid-flux branch.
+            LOG_INFO("loading PuLID weights from '%s'", sd_ctx_params->pulid_weights_path);
+            // The PuLID safetensors file ships keys like "pulid_ca.<i>.<sub>" and
+            // "pulid_encoder.*". Loading them under the "model.diffusion_model."
+            // prefix folds the pulid_ca tensors into the same tensor map the
+            // Flux runner consumes, so the Flux ctor's pulid_ca.<i> blocks bind
+            // naturally. pulid_encoder.* keys are silently ignored -- the encoder
+            // (IDFormer) runs in our Python precompute, not in sd.cpp.
+            if (!model_loader.init_from_file(sd_ctx_params->pulid_weights_path,
+                                             "model.diffusion_model.")) {
+                LOG_WARN("loading PuLID weights from '%s' failed", sd_ctx_params->pulid_weights_path);
+            }
         }
 
         if (strlen(SAFE_STR(sd_ctx_params->llm_path)) > 0) {
