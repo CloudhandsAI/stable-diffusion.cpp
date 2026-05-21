@@ -302,6 +302,13 @@ public:
             }
         }
 
+        if (strlen(SAFE_STR(sd_ctx_params->pulid_weights_path)) > 0) {
+            LOG_INFO("PuLID weights declared at '%s' (loader + injection: pending)", sd_ctx_params->pulid_weights_path);
+            // TODO(cloudhands): wire PuLID cross-attention weights into the flux runner.
+            // This is milestone 4 of the PuLID-in-sd.cpp port; for now we only ack the
+            // path so the CLI flag plumbing is testable. See cloudhands/pulid-flux branch.
+        }
+
         if (strlen(SAFE_STR(sd_ctx_params->llm_path)) > 0) {
             LOG_INFO("loading llm from '%s'", sd_ctx_params->llm_path);
             if (!model_loader.init_from_file(sd_ctx_params->llm_path, "text_encoders.llm.")) {
@@ -2520,6 +2527,7 @@ void sd_ctx_params_init(sd_ctx_params_t* sd_ctx_params) {
     sd_ctx_params->chroma_t5_mask_pad      = 1;
     sd_ctx_params->backend                 = nullptr;
     sd_ctx_params->params_backend          = nullptr;
+    sd_ctx_params->pulid_weights_path      = nullptr;
 }
 
 char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params) {
@@ -2679,6 +2687,7 @@ void sd_img_gen_params_init(sd_img_gen_params_t* sd_img_gen_params) {
     sd_img_gen_params->batch_count       = 1;
     sd_img_gen_params->control_strength  = 0.9f;
     sd_img_gen_params->pm_params         = {nullptr, 0, nullptr, 20.f};
+    sd_img_gen_params->pulid_params      = {nullptr, 1.0f};
     sd_img_gen_params->vae_tiling_params = {false, false, 0, 0, 0.5f, 0.0f, 0.0f, nullptr};
     sd_cache_params_init(&sd_img_gen_params->cache);
     sd_hires_params_init(&sd_img_gen_params->hires);
@@ -2976,6 +2985,7 @@ struct GenerationRequest {
     sd_guidance_params_t guidance            = {};
     sd_guidance_params_t high_noise_guidance = {};
     sd_pm_params_t pm_params                 = {};
+    sd_pulid_params_t pulid_params           = {};
     sd_hires_params_t hires                  = {};
     int frames                               = -1;
     int requested_frames                     = -1;
@@ -3000,6 +3010,7 @@ struct GenerationRequest {
         auto_resize_ref_image       = sd_img_gen_params->auto_resize_ref_image;
         guidance                    = sd_img_gen_params->sample_params.guidance;
         pm_params                   = sd_img_gen_params->pm_params;
+        pulid_params                = sd_img_gen_params->pulid_params;
         hires                       = sd_img_gen_params->hires;
         cache_params                = &sd_img_gen_params->cache;
         resolve(sd_ctx);
