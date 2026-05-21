@@ -1069,7 +1069,9 @@ namespace Flux {
                                              ggml_tensor* mod_index_arange         = nullptr,
                                              ggml_tensor* dct                      = nullptr,
                                              std::vector<ggml_tensor*> ref_latents = {},
-                                             std::vector<int> skip_layers          = {}) {
+                                             std::vector<int> skip_layers          = {},
+                                             ggml_tensor* pulid_id                 = nullptr,
+                                             float pulid_id_weight                 = 1.0f) {
             GGML_ASSERT(x->ne[3] == 1);
 
             int64_t W      = x->ne[0];
@@ -1095,7 +1097,8 @@ namespace Flux {
             img = ggml_reshape_3d(ctx->ggml_ctx, img, img->ne[0] * img->ne[1], img->ne[2], img->ne[3]);  // [N, hidden_size, H/patch_size*W/patch_size]
             img = ggml_cont(ctx->ggml_ctx, ggml_ext_torch_permute(ctx->ggml_ctx, img, 1, 0, 2, 3));      // [N, H/patch_size*W/patch_size, hidden_size]
 
-            auto out = forward_orig(ctx, img, context, timestep, y, guidance, pe, mod_index_arange, skip_layers);  // [N, n_img_token, hidden_size]
+            auto out = forward_orig(ctx, img, context, timestep, y, guidance, pe, mod_index_arange, skip_layers,
+                                    pulid_id, pulid_id_weight);  // [N, n_img_token, hidden_size]
 
             // nerf decode
             auto nerf_image_embedder   = std::dynamic_pointer_cast<NerfEmbedder>(blocks["nerf_image_embedder"]);
@@ -1143,7 +1146,9 @@ namespace Flux {
                                          ggml_tensor* mod_index_arange         = nullptr,
                                          ggml_tensor* dct                      = nullptr,
                                          std::vector<ggml_tensor*> ref_latents = {},
-                                         std::vector<int> skip_layers          = {}) {
+                                         std::vector<int> skip_layers          = {},
+                                         ggml_tensor* pulid_id                 = nullptr,
+                                         float pulid_id_weight                 = 1.0f) {
             GGML_ASSERT(x->ne[3] == 1);
 
             int64_t W      = x->ne[0];
@@ -1190,7 +1195,8 @@ namespace Flux {
                 }
             }
 
-            auto out = forward_orig(ctx, img, context, timestep, y, guidance, pe, mod_index_arange, skip_layers);  // [N, num_tokens, C * patch_size * patch_size]
+            auto out = forward_orig(ctx, img, context, timestep, y, guidance, pe, mod_index_arange, skip_layers,
+                                    pulid_id, pulid_id_weight);  // [N, num_tokens, C * patch_size * patch_size]
 
             if (out->ne[1] > img_tokens) {
                 out = ggml_view_3d(ctx->ggml_ctx, out, out->ne[0], img_tokens, out->ne[2], out->nb[1], out->nb[2], 0);
@@ -1212,7 +1218,9 @@ namespace Flux {
                              ggml_tensor* mod_index_arange         = nullptr,
                              ggml_tensor* dct                      = nullptr,
                              std::vector<ggml_tensor*> ref_latents = {},
-                             std::vector<int> skip_layers          = {}) {
+                             std::vector<int> skip_layers          = {},
+                             ggml_tensor* pulid_id                 = nullptr,
+                             float pulid_id_weight                 = 1.0f) {
             // Forward pass of DiT.
             // x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
             // timestep: (N,) tensor of diffusion timesteps
@@ -1235,7 +1243,9 @@ namespace Flux {
                                                mod_index_arange,
                                                dct,
                                                ref_latents,
-                                               skip_layers);
+                                               skip_layers,
+                                               pulid_id,
+                                               pulid_id_weight);
             } else {
                 return forward_flux_chroma(ctx,
                                            x,
@@ -1248,7 +1258,9 @@ namespace Flux {
                                            mod_index_arange,
                                            dct,
                                            ref_latents,
-                                           skip_layers);
+                                           skip_layers,
+                                           pulid_id,
+                                           pulid_id_weight);
             }
         }
     };
@@ -1452,7 +1464,9 @@ namespace Flux {
                                  const sd::Tensor<float>& guidance_tensor                 = {},
                                  const std::vector<sd::Tensor<float>>& ref_latents_tensor = {},
                                  bool increase_ref_index                                  = false,
-                                 std::vector<int> skip_layers                             = {}) {
+                                 std::vector<int> skip_layers                             = {},
+                                 const sd::Tensor<float>& pulid_id_tensor                 = {},
+                                 float pulid_id_weight                                    = 1.0f) {
             ggml_tensor* x         = make_input(x_tensor);
             ggml_tensor* timesteps = make_input(timesteps_tensor);
             ggml_tensor* context   = make_optional_input(context_tensor);
@@ -1529,6 +1543,13 @@ namespace Flux {
                 set_backend_tensor_data(dct, dct_vec.data());
             }
 
+            // Materialize the PuLID id embedding into the compute graph when
+            // pulid_id_tensor is non-empty. forward() accepts nullptr for the
+            // no-injection case.
+            ggml_tensor* pulid_id = pulid_id_tensor.empty()
+                                      ? nullptr
+                                      : make_input(pulid_id_tensor);
+
             auto runner_ctx = get_context();
 
             ggml_tensor* out = flux.forward(&runner_ctx,
@@ -1542,7 +1563,9 @@ namespace Flux {
                                             mod_index_arange,
                                             dct,
                                             ref_latents,
-                                            skip_layers);
+                                            skip_layers,
+                                            pulid_id,
+                                            pulid_id_weight);
 
             ggml_build_forward_expand(gf, out);
 
@@ -1558,14 +1581,17 @@ namespace Flux {
                                   const sd::Tensor<float>& guidance                 = {},
                                   const std::vector<sd::Tensor<float>>& ref_latents = {},
                                   bool increase_ref_index                           = false,
-                                  std::vector<int> skip_layers                      = std::vector<int>()) {
+                                  std::vector<int> skip_layers                      = std::vector<int>(),
+                                  const sd::Tensor<float>& pulid_id                 = {},
+                                  float pulid_id_weight                             = 1.0f) {
             // x: [N, in_channels, h, w]
             // timesteps: [N, ]
             // context: [N, max_position, hidden_size]
             // y: [N, adm_in_channels] or [1, adm_in_channels]
             // guidance: [N, ]
+            // pulid_id: empty (no injection) or [N, num_id_tokens=32, kv_dim=2048]
             auto get_graph = [&]() -> ggml_cgraph* {
-                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, skip_layers);
+                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, skip_layers, pulid_id, pulid_id_weight);
             };
 
             auto result = restore_trailing_singleton_dims(GGMLRunner::compute<float>(get_graph, n_threads, false), x.dim());

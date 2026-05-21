@@ -1862,7 +1862,9 @@ public:
                              int audio_length,
                              float frame_rate,
                              const sd_cache_params_t* cache_params,
-                             const sd::Tensor<float>& video_positions = {}) {
+                             const sd::Tensor<float>& video_positions = {},
+                             const sd::Tensor<float>& pulid_id_tensor = {},
+                             float pulid_id_weight                    = 1.0f) {
         std::vector<int> skip_layers(guidance.slg.layers, guidance.slg.layers + guidance.slg.layer_count);
         float cfg_scale     = guidance.txt_cfg;
         float img_cfg_scale = guidance.img_cfg;
@@ -1975,6 +1977,8 @@ public:
             diffusion_params.frame_rate         = frame_rate;
             diffusion_params.video_positions    = video_positions.empty() ? nullptr : &video_positions;
             diffusion_params.skip_layers        = nullptr;
+            diffusion_params.pulid_id           = pulid_id_tensor.empty() ? nullptr : &pulid_id_tensor;
+            diffusion_params.pulid_id_weight    = pulid_id_weight;
 
             compute_sample_controls(control_image,
                                     noised_input,
@@ -2495,6 +2499,98 @@ void sd_cache_params_init(sd_cache_params_t* cache_params) {
     cache_params->spectrum_stop_percent       = 0.9f;
 }
 
+/**
+ * Load a .pulidembd binary file produced by runtime-scripts/pulid_extract_id.py
+ * into a sd::Tensor<float> (always materialized as fp32 for the diffusion path).
+ * Returns an empty tensor on any failure (the caller treats empty as "PuLID off").
+ *
+ * Format mirrored from include/stable-diffusion.h sd_pulid_params_t docstring:
+ *   offset 0   : magic "PULIDV01"           (8 bytes ASCII)
+ *   offset 8   : num_tokens (uint32 LE)     (typically 32)
+ *   offset 12  : token_dim (uint32 LE)      (typically 2048)
+ *   offset 16  : dtype (uint8): 0=fp16, 1=bf16, 2=fp32
+ *   offset 17  : reserved zeros             (15 bytes; header total = 32)
+ *   offset 32  : tokens, row-major LE
+ */
+static sd::Tensor<float> load_pulid_id_embedding(const char* path) {
+    sd::Tensor<float> empty;
+    if (path == nullptr || strlen(path) == 0) {
+        return empty;
+    }
+    FILE* f = ggml_fopen(path, "rb");
+    if (f == nullptr) {
+        LOG_WARN("PuLID id-embedding: cannot open '%s'", path);
+        return empty;
+    }
+    uint8_t header[32];
+    if (fread(header, 1, sizeof(header), f) != sizeof(header)) {
+        LOG_WARN("PuLID id-embedding: short header in '%s'", path);
+        fclose(f);
+        return empty;
+    }
+    if (memcmp(header, "PULIDV01", 8) != 0) {
+        LOG_WARN("PuLID id-embedding: bad magic in '%s' (expected PULIDV01)", path);
+        fclose(f);
+        return empty;
+    }
+    uint32_t num_tokens = (uint32_t)header[8] | ((uint32_t)header[9] << 8) |
+                         ((uint32_t)header[10] << 16) | ((uint32_t)header[11] << 24);
+    uint32_t token_dim  = (uint32_t)header[12] | ((uint32_t)header[13] << 8) |
+                         ((uint32_t)header[14] << 16) | ((uint32_t)header[15] << 24);
+    uint8_t  dtype      = header[16];
+
+    if (num_tokens == 0 || token_dim == 0 || num_tokens > 1024 || token_dim > 65536) {
+        LOG_WARN("PuLID id-embedding: implausible shape (%u, %u) in '%s'", num_tokens, token_dim, path);
+        fclose(f);
+        return empty;
+    }
+
+    const size_t n_elem  = (size_t)num_tokens * (size_t)token_dim;
+    size_t       elem_sz = 0;
+    switch (dtype) {
+        case 0: elem_sz = 2; break;  // fp16
+        case 1: elem_sz = 2; break;  // bf16
+        case 2: elem_sz = 4; break;  // fp32
+        default:
+            LOG_WARN("PuLID id-embedding: unknown dtype byte %u in '%s'", (unsigned)dtype, path);
+            fclose(f);
+            return empty;
+    }
+
+    std::vector<uint8_t> raw(n_elem * elem_sz);
+    if (fread(raw.data(), 1, raw.size(), f) != raw.size()) {
+        LOG_WARN("PuLID id-embedding: short body in '%s' (expected %zu bytes)", path, raw.size());
+        fclose(f);
+        return empty;
+    }
+    fclose(f);
+
+    // sd::Tensor<float> layout follows ggml: ne[0] = innermost dim. Our binary file
+    // is row-major (num_tokens, token_dim), which means token_dim is innermost.
+    sd::Tensor<float> out({(int64_t)token_dim, (int64_t)num_tokens, 1});
+    float* dst = out.data();
+    if (dtype == 0) {  // fp16
+        const ggml_fp16_t* src = reinterpret_cast<const ggml_fp16_t*>(raw.data());
+        for (size_t i = 0; i < n_elem; i++) {
+            dst[i] = ggml_fp16_to_fp32(src[i]);
+        }
+    } else if (dtype == 1) {  // bf16 -- bit-pattern of fp32 with bottom 16 bits zero
+        const uint16_t* src = reinterpret_cast<const uint16_t*>(raw.data());
+        for (size_t i = 0; i < n_elem; i++) {
+            uint32_t bits = ((uint32_t)src[i]) << 16;
+            float    val;
+            memcpy(&val, &bits, sizeof(val));
+            dst[i] = val;
+        }
+    } else {  // fp32
+        memcpy(dst, raw.data(), raw.size());
+    }
+
+    LOG_INFO("PuLID id-embedding: loaded (%u, %u) dtype=%u from '%s'",
+             num_tokens, token_dim, (unsigned)dtype, path);
+    return out;
+}
+
 void sd_hires_params_init(sd_hires_params_t* hires_params) {
     *hires_params                     = {};
     hires_params->enabled             = false;
@@ -2993,6 +3089,9 @@ struct GenerationRequest {
     sd_guidance_params_t high_noise_guidance = {};
     sd_pm_params_t pm_params                 = {};
     sd_pulid_params_t pulid_params           = {};
+    // Materialized PuLID id embedding -- populated from pulid_params.id_embedding_path
+    // by load_pulid_id_embedding(). Empty when PuLID is disabled or the file is missing.
+    sd::Tensor<float> pulid_id_tensor;
     sd_hires_params_t hires                  = {};
     int frames                               = -1;
     int requested_frames                     = -1;
@@ -3018,6 +3117,7 @@ struct GenerationRequest {
         guidance                    = sd_img_gen_params->sample_params.guidance;
         pm_params                   = sd_img_gen_params->pm_params;
         pulid_params                = sd_img_gen_params->pulid_params;
+        pulid_id_tensor             = load_pulid_id_embedding(pulid_params.id_embedding_path);
         hires                       = sd_img_gen_params->hires;
         cache_params                = &sd_img_gen_params->cache;
         resolve(sd_ctx);
@@ -5114,7 +5214,9 @@ SD_API bool generate_video(sd_ctx_t* sd_ctx,
                                                         latents.audio_length,
                                                         static_cast<float>(request.fps),
                                                         request.cache_params,
-                                                        latents.video_positions);
+                                                        latents.video_positions,
+                                                        request.pulid_id_tensor,
+                                                        request.pulid_params.id_weight);
 
     int64_t sampling_end = ggml_time_ms();
     if (final_latent.empty()) {
