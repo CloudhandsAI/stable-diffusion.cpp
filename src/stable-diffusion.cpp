@@ -4341,7 +4341,10 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
                                                    1.f,
                                                    0,
                                                    static_cast<float>(request.fps),
-                                                   request.cache_params);
+                                                   request.cache_params,
+                                                   /*video_positions=*/sd::Tensor<float>(),
+                                                   request.pulid_id_tensor,
+                                                   request.pulid_params.id_weight);
         int64_t sampling_end  = ggml_time_ms();
         if (!x_0.empty()) {
             LOG_INFO("sampling completed, taking %.2fs", (sampling_end - sampling_start) * 1.0f / 1000);
@@ -4461,7 +4464,10 @@ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* s
                                                             1.f,
                                                             0,
                                                             static_cast<float>(request.fps),
-                                                            request.cache_params);
+                                                            request.cache_params,
+                                                            /*video_positions=*/sd::Tensor<float>(),
+                                                            request.pulid_id_tensor,
+                                                            request.pulid_params.id_weight);
             int64_t hires_sample_end   = ggml_time_ms();
             if (!x_0.empty()) {
                 LOG_INFO("hires sampling %d/%d completed, taking %.2fs",
