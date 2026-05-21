@@ -6,6 +6,7 @@
 
 #include "common_dit.hpp"
 #include "model.h"
+#include "pulid.hpp"
 #include "rope.hpp"
 
 #define FLUX_GRAPH_SIZE 10240
@@ -758,6 +759,13 @@ namespace Flux {
         bool use_mlp_silu_act     = false;
         float ref_index_scale     = 1.f;
         ChromaRadianceParams chroma_radiance_params;
+
+        // PuLID-Flux identity injection. Turned on by the runner when a
+        // --pulid-weights path is provided. The intervals are fixed by the
+        // PuLID v0.9.1 architecture (every 2nd double, every 4th single).
+        bool pulid_enabled         = false;
+        int  pulid_double_interval = 2;
+        int  pulid_single_interval = 4;
     };
 
     struct Flux : public GGMLBlock {
@@ -844,6 +852,29 @@ namespace Flux {
                 blocks["double_stream_modulation_img"] = std::make_shared<Modulation>(params.hidden_size, true, !params.disable_bias);
                 blocks["double_stream_modulation_txt"] = std::make_shared<Modulation>(params.hidden_size, true, !params.disable_bias);
                 blocks["single_stream_modulation"]     = std::make_shared<Modulation>(params.hidden_size, false, !params.disable_bias);
+            }
+
+            // PuLID-Flux identity-injection cross-attention modules. Only constructed
+            // when params.pulid_enabled is set (turned on by the runner after seeing a
+            // --pulid-weights path during model load). Counts come straight from PuLID
+            // v0.9.1's pipeline_flux.py: every `pulid_double_interval` double block
+            // (=2) and every `pulid_single_interval` single block (=4). For a stock
+            // Flux Dev (depth=19, depth_single_blocks=38), this means 10 + 10 = 20
+            // hook points... but the reference uses ceil-rounding so the actual count
+            // is `ceil(depth/2) + ceil(depth_single_blocks/4)` = 10 + 10 = 20. PuLID
+            // v0.9.1 trained weights have 20 entries.
+            if (params.pulid_enabled) {
+                int num_double_ca = (params.depth                 + params.pulid_double_interval - 1) / params.pulid_double_interval;
+                int num_single_ca = (params.depth_single_blocks   + params.pulid_single_interval - 1) / params.pulid_single_interval;
+                int num_ca        = num_double_ca + num_single_ca;
+                for (int i = 0; i < num_ca; i++) {
+                    blocks["pulid_ca." + std::to_string(i)] =
+                        std::shared_ptr<GGMLBlock>(new PuLIDPerceiverAttentionCA(
+                            /*dim=*/    params.hidden_size,
+                            /*dim_head=*/PuLIDPerceiverAttentionCA::DEFAULT_DIM_HEAD,
+                            /*heads=*/   PuLIDPerceiverAttentionCA::DEFAULT_HEADS,
+                            /*kv_dim=*/  PuLIDPerceiverAttentionCA::DEFAULT_KV_DIM));
+                }
             }
         }
 
