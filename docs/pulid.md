@@ -173,6 +173,12 @@ or computing something even at zero weight -- likely a bug.
 
 ## Limitations / not yet supported
 
+- **`--skip-layers` (skip-layer-guidance / SLG) combined with PuLID** is not
+  supported. The `pulid_ca` index advances per non-skipped block, so a
+  skipped block silently misaligns the cross-attention weight assignment
+  vs. the trained intervals. The reference PyTorch implementation does
+  not have SLG either, so there is no well-defined behavior to emulate.
+  Use either feature alone.
 - **PuLID v1.1 weights** (`pulid_v1.1.safetensors`, renamed key layout).
 - **Multiple ID images.** The reference PyTorch implementation can fuse
   several portraits into one embedding for stronger identity. This

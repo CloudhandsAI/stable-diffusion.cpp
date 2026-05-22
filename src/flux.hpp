@@ -970,8 +970,17 @@ namespace Flux {
             // run *between* transformer blocks, with their output added to
             // img (scaled by id_weight) at every `pulid_double_interval`-th
             // double_block and every `pulid_single_interval`-th single_block.
+            //
+            // skip_layers + PuLID is NOT a supported combination -- skipping
+            // a block at a PuLID-aligned index would either misalign the
+            // ca_idx assignment (silent quality regression) or require us
+            // to invent a non-reference index policy. Refuse early instead.
             const bool pulid_active = params.pulid_enabled && pulid_id != nullptr;
-            int        ca_idx       = 0;
+            if (pulid_active && !skip_layers.empty()) {
+                LOG_WARN("PuLID + skip_layers is not supported; disabling PuLID for this generation.");
+            }
+            const bool pulid_run = pulid_active && skip_layers.empty();
+            int        ca_idx    = 0;
 
             for (int i = 0; i < params.depth; i++) {
                 if (skip_layers.size() > 0 && std::find(skip_layers.begin(), skip_layers.end(), i) != skip_layers.end()) {
@@ -986,7 +995,7 @@ namespace Flux {
                 sd::ggml_graph_cut::mark_graph_cut(img, "flux.double_blocks." + std::to_string(i), "img");
                 sd::ggml_graph_cut::mark_graph_cut(txt, "flux.double_blocks." + std::to_string(i), "txt");
 
-                if (pulid_active && (i % params.pulid_double_interval == 0)) {
+                if (pulid_run && (i % params.pulid_double_interval == 0)) {
                     auto pulid_ca = std::dynamic_pointer_cast<PuLIDPerceiverAttentionCA>(
                         blocks["pulid_ca." + std::to_string(ca_idx)]);
                     ggml_tensor* ca_out = pulid_ca->forward(ctx, pulid_id, img);   // [N, n_img_token, hidden_size]
@@ -1007,7 +1016,7 @@ namespace Flux {
                 txt_img = block->forward(ctx, txt_img, vec, pe, txt_img_mask, ss_mods);
                 sd::ggml_graph_cut::mark_graph_cut(txt_img, "flux.single_blocks." + std::to_string(i), "txt_img");
 
-                if (pulid_active && (i % params.pulid_single_interval == 0)) {
+                if (pulid_run && (i % params.pulid_single_interval == 0)) {
                     auto pulid_ca = std::dynamic_pointer_cast<PuLIDPerceiverAttentionCA>(
                         blocks["pulid_ca." + std::to_string(ca_idx)]);
                     // Split txt_img into [txt | img], inject ID into the img portion
