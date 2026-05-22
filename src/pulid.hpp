@@ -85,26 +85,28 @@ public:
         auto to_kv  = std::dynamic_pointer_cast<Linear>(blocks["to_kv"]);
         auto to_out = std::dynamic_pointer_cast<Linear>(blocks["to_out"]);
 
-        // Normalize each input on its own dim.
-        ggml_tensor* x   = norm1->forward(ctx, id_embedding);  // [N, 32,  2048]
-        ggml_tensor* lat = norm2->forward(ctx, image_tokens);  // [N, T_img, 3072]
+        // Normalize each input on its own dim. The PyTorch reference normalizes
+        // x (id_embedding) and `latents` (image_tokens) separately, then uses
+        // latents for Q and x for K/V -- mind the unusual cross-attention shape.
+        ggml_tensor* x_normed   = norm1->forward(ctx, id_embedding);    // [N, 32, 2048]
+        ggml_tensor* lat_normed = norm2->forward(ctx, image_tokens);    // [N, T_img, 3072]
 
-        // Projections.
-        ggml_tensor* q  = to_q->forward(ctx, lat);   // [N, T_img, 2048]
-        ggml_tensor* kv = to_kv->forward(ctx, x);    // [N, 32,    4096]
+        // Projections. to_q : 3072 -> 2048 ; to_kv : 2048 -> 4096 (k concat v).
+        ggml_tensor* q  = to_q->forward(ctx, lat_normed);   // [N, T_img, 2048]
+        ggml_tensor* kv = to_kv->forward(ctx, x_normed);    // [N, 32,    4096]
 
-        // Split KV into K and V on the last axis.
-        // ggml_view_3d does this without a copy.
-        const int64_t k_offset = 0;
-        const int64_t v_offset = inner_dim * ggml_element_size(kv);  // bytes into the last dim
+        // Split KV into K (first inner_dim of last axis) and V (second
+        // inner_dim). ggml_view_3d gives strided views without copying;
+        // ggml_cont materializes them so ggml_ext_attention_ext sees
+        // contiguous tensors.
         ggml_tensor* k = ggml_view_3d(ctx->ggml_ctx, kv,
                                        inner_dim, kv->ne[1], kv->ne[2],
                                        kv->nb[1], kv->nb[2],
-                                       k_offset);  // [N, 32, 2048]
+                                       /*offset=*/0);                              // [N, 32, 2048]
         ggml_tensor* v = ggml_view_3d(ctx->ggml_ctx, kv,
                                        inner_dim, kv->ne[1], kv->ne[2],
                                        kv->nb[1], kv->nb[2],
-                                       v_offset);  // [N, 32, 2048]
+                                       /*offset=*/inner_dim * ggml_element_size(kv)); // [N, 32, 2048]
         k = ggml_cont(ctx->ggml_ctx, k);
         v = ggml_cont(ctx->ggml_ctx, v);
 
