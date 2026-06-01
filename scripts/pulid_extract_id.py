@@ -1,9 +1,9 @@
 """
 Precompute a PuLID-Flux identity embedding from a single source portrait.
 
-Writes a .pulidembd binary file that stable-diffusion.cpp's
-`--pulid-id-embedding` flag consumes. See docs/pulid.md for the binary
-format and overall PuLID-Flux flow.
+Writes a gguf file (a single tensor `pulid_id`) that stable-diffusion.cpp's
+`--pulid-id-embedding` flag consumes. See docs/pulid.md for the format and
+overall PuLID-Flux flow.
 
 This script intentionally lives outside the C++ build: identity extraction
 needs insightface + EVA-CLIP-L + IDFormer, which are PyTorch-only stacks
@@ -34,14 +34,7 @@ from __future__ import annotations
 
 import argparse
 import os
-import struct
 import sys
-
-MAGIC = b"PULIDV01"
-HEADER_SIZE = 32
-DTYPE_FP16 = 0
-DTYPE_BF16 = 1
-DTYPE_FP32 = 2
 
 
 def _make_minimal_flux_skeleton(device):
@@ -98,38 +91,42 @@ def extract(portrait_path: str, pulid_weights: str) -> "torch.Tensor":
 
 
 def write_embd(tensor, out_path: str, dtype_choice: str) -> None:
+    import gguf
     import torch
 
     if tensor.ndim != 2:
         raise ValueError(f"expected (num_tokens, token_dim); got {tuple(tensor.shape)}")
     num_tokens, token_dim = tensor.shape
 
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+
+    # The embedding ships as a standard gguf container holding a single tensor
+    # named "pulid_id". numpy is row-major (num_tokens, token_dim); gguf stores
+    # dims reversed, so stable-diffusion.cpp reads it back as
+    # ne[0]=token_dim, ne[1]=num_tokens (see load_pulid_id_embedding).
+    writer = gguf.GGUFWriter(out_path, arch="pulid")
+    writer.add_uint32("pulid.version", 1)
+
     if dtype_choice == "fp16":
-        cast = tensor.to(torch.float16)
-        dtype_byte = DTYPE_FP16
-        raw = cast.contiguous().cpu().numpy().tobytes()
-    elif dtype_choice == "bf16":
-        cast = tensor.to(torch.bfloat16)
-        dtype_byte = DTYPE_BF16
-        raw = cast.contiguous().view(torch.uint16).cpu().numpy().tobytes()
+        arr = tensor.to(torch.float16).contiguous().cpu().numpy()
+        writer.add_tensor("pulid_id", arr)
     elif dtype_choice == "fp32":
-        cast = tensor.to(torch.float32)
-        dtype_byte = DTYPE_FP32
-        raw = cast.contiguous().cpu().numpy().tobytes()
+        arr = tensor.to(torch.float32).contiguous().cpu().numpy()
+        writer.add_tensor("pulid_id", arr)
+    elif dtype_choice == "bf16":
+        raw = tensor.to(torch.bfloat16).contiguous().view(torch.uint16).cpu().numpy()
+        writer.add_tensor("pulid_id", raw,
+                          raw_shape=(int(num_tokens), int(token_dim)),
+                          raw_dtype=gguf.GGMLQuantizationType.BF16)
     else:
         raise ValueError(f"unknown --dtype {dtype_choice}")
 
-    header = struct.pack("<8sIIB15x",
-                         MAGIC, int(num_tokens), int(token_dim), dtype_byte)
-    assert len(header) == HEADER_SIZE, f"header size {len(header)} != {HEADER_SIZE}"
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
 
-    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-    with open(out_path, "wb") as f:
-        f.write(header)
-        f.write(raw)
-
-    total = HEADER_SIZE + len(raw)
-    print(f"wrote {out_path}: header={HEADER_SIZE}B data={len(raw)}B total={total}B",
+    print(f"wrote {out_path}: gguf, tensor pulid_id [{token_dim}, {num_tokens}] {dtype_choice}",
           flush=True)
 
 

@@ -4,6 +4,7 @@
 
 #include "ggml_extend.hpp"
 #include "ggml_graph_cut.h"
+#include "gguf.h"
 
 #include "model.h"
 #include "rng.hpp"
@@ -2700,94 +2701,78 @@ void sd_cache_params_init(sd_cache_params_t* cache_params) {
 }
 
 /**
- * Load a .pulidembd binary file produced by runtime-scripts/pulid_extract_id.py
- * into a sd::Tensor<float> (always materialized as fp32 for the diffusion path).
- * Returns an empty tensor on any failure (the caller treats empty as "PuLID off").
+ * Load the precomputed PuLID identity embedding produced by
+ * scripts/pulid_extract_id.py into a sd::Tensor<float> (always materialized as
+ * fp32 for the diffusion path). Returns an empty tensor on any failure (the
+ * caller treats empty as "PuLID off").
  *
- * Format mirrored from include/stable-diffusion.h sd_pulid_params_t docstring:
- *   offset 0   : magic "PULIDV01"           (8 bytes ASCII)
- *   offset 8   : num_tokens (uint32 LE)     (typically 32)
- *   offset 12  : token_dim (uint32 LE)      (typically 2048)
- *   offset 16  : dtype (uint8): 0=fp16, 1=bf16, 2=fp32
- *   offset 17  : reserved zeros             (15 bytes; header total = 32)
- *   offset 32  : tokens, row-major LE
+ * The file is a standard gguf container holding a single tensor named
+ * "pulid_id" with shape [token_dim, num_tokens] (ggml order; typically
+ * [2048, 32]) in f16 / bf16 / f32. Using gguf rather than a bespoke header
+ * means the shape + dtype are self-describing and we reuse ggml's reader.
  */
 static sd::Tensor<float> load_pulid_id_embedding(const char* path) {
     sd::Tensor<float> empty;
     if (path == nullptr || strlen(path) == 0) {
         return empty;
     }
-    FILE* f = ggml_fopen(path, "rb");
-    if (f == nullptr) {
-        LOG_WARN("PuLID id-embedding: cannot open '%s'", path);
-        return empty;
-    }
-    uint8_t header[32];
-    if (fread(header, 1, sizeof(header), f) != sizeof(header)) {
-        LOG_WARN("PuLID id-embedding: short header in '%s'", path);
-        fclose(f);
-        return empty;
-    }
-    if (memcmp(header, "PULIDV01", 8) != 0) {
-        LOG_WARN("PuLID id-embedding: bad magic in '%s' (expected PULIDV01)", path);
-        fclose(f);
-        return empty;
-    }
-    uint32_t num_tokens = (uint32_t)header[8] | ((uint32_t)header[9] << 8) |
-                         ((uint32_t)header[10] << 16) | ((uint32_t)header[11] << 24);
-    uint32_t token_dim  = (uint32_t)header[12] | ((uint32_t)header[13] << 8) |
-                         ((uint32_t)header[14] << 16) | ((uint32_t)header[15] << 24);
-    uint8_t  dtype      = header[16];
 
-    if (num_tokens == 0 || token_dim == 0 || num_tokens > 1024 || token_dim > 65536) {
-        LOG_WARN("PuLID id-embedding: implausible shape (%u, %u) in '%s'", num_tokens, token_dim, path);
-        fclose(f);
+    struct ggml_context* ctx_data    = nullptr;
+    struct gguf_init_params gp        = {/*.no_alloc =*/false, /*.ctx =*/&ctx_data};
+    struct gguf_context*    gguf_ctx  = gguf_init_from_file(path, gp);
+    if (gguf_ctx == nullptr || ctx_data == nullptr) {
+        LOG_WARN("PuLID id-embedding: cannot read gguf '%s'", path);
+        if (gguf_ctx != nullptr) gguf_free(gguf_ctx);
+        if (ctx_data != nullptr) ggml_free(ctx_data);
         return empty;
     }
 
-    const size_t n_elem  = (size_t)num_tokens * (size_t)token_dim;
-    size_t       elem_sz = 0;
-    switch (dtype) {
-        case 0: elem_sz = 2; break;  // fp16
-        case 1: elem_sz = 2; break;  // bf16
-        case 2: elem_sz = 4; break;  // fp32
-        default:
-            LOG_WARN("PuLID id-embedding: unknown dtype byte %u in '%s'", (unsigned)dtype, path);
-            fclose(f);
-            return empty;
-    }
-
-    std::vector<uint8_t> raw(n_elem * elem_sz);
-    if (fread(raw.data(), 1, raw.size(), f) != raw.size()) {
-        LOG_WARN("PuLID id-embedding: short body in '%s' (expected %zu bytes)", path, raw.size());
-        fclose(f);
+    struct ggml_tensor* t = ggml_get_tensor(ctx_data, "pulid_id");
+    if (t == nullptr) {
+        LOG_WARN("PuLID id-embedding: no 'pulid_id' tensor in '%s'", path);
+        gguf_free(gguf_ctx);
+        ggml_free(ctx_data);
         return empty;
     }
-    fclose(f);
 
-    // sd::Tensor<float> layout follows ggml: ne[0] = innermost dim. Our binary file
-    // is row-major (num_tokens, token_dim), which means token_dim is innermost.
-    sd::Tensor<float> out({(int64_t)token_dim, (int64_t)num_tokens, 1});
-    float* dst = out.data();
-    if (dtype == 0) {  // fp16
-        const ggml_fp16_t* src = reinterpret_cast<const ggml_fp16_t*>(raw.data());
+    const int64_t token_dim  = t->ne[0];
+    const int64_t num_tokens = t->ne[1];
+    if (token_dim <= 0 || num_tokens <= 0 || token_dim > 65536 || num_tokens > 1024 ||
+        t->ne[2] != 1 || t->ne[3] != 1) {
+        LOG_WARN("PuLID id-embedding: implausible shape [%lld, %lld] in '%s'",
+                 (long long)token_dim, (long long)num_tokens, path);
+        gguf_free(gguf_ctx);
+        ggml_free(ctx_data);
+        return empty;
+    }
+
+    const size_t      n_elem = (size_t)token_dim * (size_t)num_tokens;
+    sd::Tensor<float> out({token_dim, num_tokens, 1});
+    float*            dst = out.data();
+    if (t->type == GGML_TYPE_F32) {
+        memcpy(dst, t->data, n_elem * sizeof(float));
+    } else if (t->type == GGML_TYPE_F16) {
+        const ggml_fp16_t* src = reinterpret_cast<const ggml_fp16_t*>(t->data);
         for (size_t i = 0; i < n_elem; i++) {
             dst[i] = ggml_fp16_to_fp32(src[i]);
         }
-    } else if (dtype == 1) {  // bf16 -- bit-pattern of fp32 with bottom 16 bits zero
-        const uint16_t* src = reinterpret_cast<const uint16_t*>(raw.data());
+    } else if (t->type == GGML_TYPE_BF16) {
+        const ggml_bf16_t* src = reinterpret_cast<const ggml_bf16_t*>(t->data);
         for (size_t i = 0; i < n_elem; i++) {
-            uint32_t bits = ((uint32_t)src[i]) << 16;
-            float    val;
-            memcpy(&val, &bits, sizeof(val));
-            dst[i] = val;
+            dst[i] = ggml_bf16_to_fp32(src[i]);
         }
-    } else {  // fp32
-        memcpy(dst, raw.data(), raw.size());
+    } else {
+        LOG_WARN("PuLID id-embedding: unsupported tensor type %s in '%s'",
+                 ggml_type_name(t->type), path);
+        gguf_free(gguf_ctx);
+        ggml_free(ctx_data);
+        return empty;
     }
 
-    LOG_INFO("PuLID id-embedding: loaded (%u, %u) dtype=%u from '%s'",
-             num_tokens, token_dim, (unsigned)dtype, path);
+    LOG_INFO("PuLID id-embedding: loaded [%lld, %lld] type=%s from '%s'",
+             (long long)token_dim, (long long)num_tokens, ggml_type_name(t->type), path);
+    gguf_free(gguf_ctx);
+    ggml_free(ctx_data);
     return out;
 }
 
