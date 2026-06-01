@@ -70,20 +70,20 @@ python pulid_extract_id.py \
   --out /path/to/source.pulidembd
 ```
 
-## Binary format (.pulidembd)
+## Format (gguf)
+
+The embedding is a standard **gguf** container holding a single tensor:
 
 ```
-offset 0   : magic "PULIDV01"      (8 bytes ASCII)
-offset 8   : num_tokens (uint32 LE)   typically 32
-offset 12  : token_dim (uint32 LE)    typically 2048
-offset 16  : dtype (uint8): 0=fp16, 1=bf16, 2=fp32
-offset 17  : reserved zeros        (15 bytes; header total = 32)
-offset 32  : tokens, row-major LE  (num_tokens * token_dim values)
+tensor name : "pulid_id"
+shape       : [token_dim, num_tokens]   (ggml order; typically [2048, 32])
+type        : F16 (also accepts F32 / BF16)
+metadata    : general.architecture = "pulid", pulid.version = 1
 ```
 
-stable-diffusion.cpp parses the header, validates the magic, and converts
-to fp32 at load time. Total file size for the typical (32, 2048, fp16)
-case is 131 KB.
+stable-diffusion.cpp loads it with the normal gguf reader
+(`gguf_init_from_file`) and converts to fp32 at load time -- no bespoke
+parser. Total file size for the typical (32, 2048, fp16) case is ~131 KB.
 
 ## Command-line usage
 

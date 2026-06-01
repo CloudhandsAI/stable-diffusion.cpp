@@ -295,13 +295,9 @@ typedef struct {
  * produced by an external tool (runtime-scripts/pulid_extract_id.py in the
  * Cloudhands client tree).
  *
- * Binary format (.pulidembd):
- *   offset 0   : magic "PULIDV01"      (8 bytes ASCII)
- *   offset 8   : num_tokens (uint32 LE)
- *   offset 12  : token_dim (uint32 LE)
- *   offset 16  : dtype (uint8): 0=fp16, 1=bf16, 2=fp32
- *   offset 17  : reserved zeros        (15 bytes; header = 32 bytes total)
- *   offset 32  : tokens, row-major LE  (num_tokens * token_dim values)
+ * Format: a gguf container with a single tensor "pulid_id" of shape
+ * [token_dim, num_tokens] (ggml order; typically [2048, 32]) in F16/F32/BF16.
+ * Loaded with the standard gguf reader; see docs/pulid.md.
  */
 typedef struct {
     const char* id_embedding_path;  // path to .pulidembd file produced by pulid_extract_id.py
