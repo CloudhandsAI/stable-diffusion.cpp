@@ -194,14 +194,26 @@ public:
                 "vae decode compute failed while processing a tile",
                 silent);
         } else {
+            // AUTO mode (enabled=false, auto_tile=true): proactively measure the untiled decode's
+            // compute buffer and, if it would exceed the backend's max single-buffer size, decline
+            // to allocate so the fallback below kicks in *without* the backend printing its raw
+            // allocation error. The reactive output.empty() check still backstops genuine runtime
+            // OOM (planned size fits the max, but the device is out of memory).
+            const bool auto_probe = !tiling_params.enabled && tiling_params.auto_tile;
+            if (auto_probe) {
+                set_probe_compute_buffer_fits(true);
+            }
             output = _compute(n_threads, input, true);
+            if (auto_probe) {
+                set_probe_compute_buffer_fits(false);
+            }
             if (output.empty() && !tiling_params.enabled && tiling_params.auto_tile) {
-                // AUTO mode (enabled=false, auto_tile=true): the untiled VAE decode compute buffer
-                // can exceed the backend's maximum single buffer / allocation size — common on
-                // integrated GPUs, where the ceiling is per-buffer (e.g. Vulkan maxBufferSize), not
-                // total memory. sd.cpp already supports tiling that keeps each compute buffer small,
-                // so fall back to it automatically instead of failing the whole decode. CPU remains
-                // the ultimate fallback if even a tiled buffer cannot be allocated.
+                // The untiled VAE decode compute buffer can exceed the backend's maximum single
+                // buffer / allocation size — common on integrated GPUs, where the ceiling is
+                // per-buffer (e.g. Vulkan maxBufferSize), not total memory. sd.cpp already supports
+                // tiling that keeps each compute buffer small, so fall back to it automatically
+                // instead of failing the whole decode. CPU remains the ultimate fallback if even a
+                // tiled buffer cannot be allocated.
                 free_compute_buffer();
                 if (!silent) {
                     LOG_WARN("vae: untiled decode buffer exceeded the backend limit; retrying with tiling");

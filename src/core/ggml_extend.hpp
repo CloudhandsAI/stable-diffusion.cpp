@@ -1710,6 +1710,12 @@ protected:
     bool stream_layers_enabled            = false;
     size_t observed_max_effective_budget_ = 0;
 
+    // When set, alloc_compute_buffer first measures the graph's planned compute
+    // buffer size (no allocation) and bails before allocating if it exceeds the
+    // backend's max single-buffer size. Used by VAE AUTO tiling to fall back to
+    // tiling proactively instead of attempting (and failing) a too-large decode.
+    bool probe_compute_buffer_fits_ = false;
+
     sd::layer_registry::LayerRegistry layer_registry_;
 
     std::shared_ptr<WeightAdapter> weight_adapter = nullptr;
@@ -1898,7 +1904,34 @@ protected:
         if (compute_allocr != nullptr) {
             return true;
         }
-        compute_allocr = ggml_gallocr_new(ggml_backend_get_default_buffer_type(runtime_backend));
+        ggml_backend_buffer_type_t buft = ggml_backend_get_default_buffer_type(runtime_backend);
+
+        if (probe_compute_buffer_fits_) {
+            // Measure the planned compute buffer WITHOUT allocating (no_alloc
+            // planning) and bail before the real reserve if it exceeds the
+            // backend's max single-buffer size. This lets the caller (VAE AUTO
+            // tiling) fall back to tiling without the backend ever emitting its
+            // raw "allocation failed" error on the successful auto path. A
+            // genuine runtime OOM (planned size <= max, but the device is full)
+            // is NOT caught here -- it still surfaces from the real reserve
+            // below, so the reactive fallback remains the backstop.
+            size_t max_size = ggml_backend_buft_get_max_size(buft);
+            if (max_size > 0) {
+                ggml_gallocr* probe = ggml_gallocr_new(buft);
+                size_t sizes[1]     = {0};
+                ggml_gallocr_reserve_n_size(probe, gf, nullptr, nullptr, sizes);
+                ggml_gallocr_free(probe);
+                if (sizes[0] > max_size) {
+                    LOG_DEBUG("%s: untiled compute buffer %.2f MB exceeds backend max single buffer %.2f MB; deferring to tiling",
+                              get_desc().c_str(),
+                              sizes[0] / 1024.0 / 1024.0,
+                              max_size / 1024.0 / 1024.0);
+                    return false;
+                }
+            }
+        }
+
+        compute_allocr = ggml_gallocr_new(buft);
 
         if (!ggml_gallocr_reserve(compute_allocr, gf)) {
             // failed to allocate the compute buffer
@@ -3222,6 +3255,14 @@ public:
 
     void set_stream_layers_enabled(bool enabled) {
         stream_layers_enabled = enabled;
+    }
+
+    // When enabled, the next compute() measures its planned compute buffer and
+    // declines to allocate (returning failure) if it would exceed the backend's
+    // max single-buffer size, instead of attempting the allocation and emitting
+    // the backend's raw error. See probe_compute_buffer_fits_.
+    void set_probe_compute_buffer_fits(bool enabled) {
+        probe_compute_buffer_fits_ = enabled;
     }
 
     sd::layer_registry::LayerRegistry& get_layer_registry() { return layer_registry_; }
