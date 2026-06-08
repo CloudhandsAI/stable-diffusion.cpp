@@ -195,6 +195,41 @@ public:
                 silent);
         } else {
             output = _compute(n_threads, input, true);
+            if (output.empty() && !tiling_params.enabled && tiling_params.auto_tile) {
+                // AUTO mode (enabled=false, auto_tile=true): the untiled VAE decode compute buffer
+                // can exceed the backend's maximum single buffer / allocation size — common on
+                // integrated GPUs, where the ceiling is per-buffer (e.g. Vulkan maxBufferSize), not
+                // total memory. sd.cpp already supports tiling that keeps each compute buffer small,
+                // so fall back to it automatically instead of failing the whole decode. CPU remains
+                // the ultimate fallback if even a tiled buffer cannot be allocated.
+                free_compute_buffer();
+                if (!silent) {
+                    LOG_WARN("vae: untiled decode buffer exceeded the backend limit; retrying with tiling");
+                }
+                sd_tiling_params_t auto_tiling = tiling_params;
+                auto_tiling.enabled            = true;  // default tile size (32) via get_tile_sizes
+                set_tiling_params(auto_tiling);
+                const int scale_factor = get_scale_factor();
+                int64_t W              = input.shape()[0] * scale_factor;
+                int64_t H              = input.shape()[1] * scale_factor;
+                float tile_overlap;
+                int tile_size_x, tile_size_y;
+                get_tile_sizes(tile_size_x, tile_size_y, tile_overlap, auto_tiling, input.shape()[0], input.shape()[1]);
+                output = tiled_compute(
+                    input,
+                    n_threads,
+                    static_cast<int>(W),
+                    static_cast<int>(H),
+                    scale_factor,
+                    tile_size_x,
+                    tile_size_y,
+                    tile_overlap,
+                    circular_x,
+                    circular_y,
+                    true,
+                    "vae decode compute failed while processing a tile",
+                    silent);
+            }
         }
 
         free_compute_buffer();

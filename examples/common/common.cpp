@@ -1060,11 +1060,6 @@ ArgOptions SDGenerationParams::get_options() {
          false,
          &embed_image_metadata},
         {"",
-         "--vae-tiling",
-         "process vae in tiles to reduce memory usage",
-         true,
-         &vae_tiling_params.enabled},
-        {"",
          "--temporal-tiling",
          "enable temporal tiling for LTX video VAE decode",
          true,
@@ -1096,6 +1091,25 @@ ArgOptions SDGenerationParams::get_options() {
             return -1;
         }
         return 1;
+    };
+
+    // --vae-tiling [off|on|auto]: tristate. Bare "--vae-tiling" stays backward-compatible (= on).
+    //   on   -> always tile;  off -> never tile (fail if the untiled buffer doesn't fit);
+    //   auto -> (default) tile only if an untiled VAE buffer can't be allocated.
+    auto on_vae_tiling_arg = [&](int argc, const char** argv, int index) {
+        std::string val = (index + 1 < argc) ? argv[index + 1] : "";
+        if (val == "off") {
+            vae_tiling_params.enabled = false; vae_tiling_params.auto_tile = false; return 1;
+        }
+        if (val == "auto") {
+            vae_tiling_params.enabled = false; vae_tiling_params.auto_tile = true; return 1;
+        }
+        if (val == "on") {
+            vae_tiling_params.enabled = true; vae_tiling_params.auto_tile = false; return 1;
+        }
+        // bare --vae-tiling (no recognized value) -> ON, consume no extra arg
+        vae_tiling_params.enabled = true; vae_tiling_params.auto_tile = false;
+        return 0;
     };
 
     auto on_high_noise_sample_method_arg = [&](int argc, const char** argv, int index) {
@@ -1336,6 +1350,12 @@ ArgOptions SDGenerationParams::get_options() {
          "--seed",
          "RNG seed (default: 42, use random seed for < 0)",
          on_seed_arg},
+        {"",
+         "--vae-tiling",
+         "VAE tiling mode: off | on | auto (default: auto - tile only if the untiled VAE buffer "
+         "won't fit the backend's max allocation; avoids OOM on integrated/low-VRAM GPUs). "
+         "Bare --vae-tiling = on.",
+         on_vae_tiling_arg},
         {"",
          "--sampling-method",
          "sampling method, one of [euler, euler_a, heun, dpm2, dpm++2s_a, dpm++2m, dpm++2mv2, ipndm, ipndm_v, lcm, ddim_trailing, tcd, res_multistep, res_2s, er_sde, euler_cfg_pp, euler_a_cfg_pp]"
@@ -1807,6 +1827,9 @@ bool SDGenerationParams::from_json_str(
         const json& tiling_json = j["vae_tiling_params"];
         if (tiling_json.contains("enabled") && tiling_json["enabled"].is_boolean()) {
             vae_tiling_params.enabled = tiling_json["enabled"];
+        }
+        if (tiling_json.contains("auto_tile") && tiling_json["auto_tile"].is_boolean()) {
+            vae_tiling_params.auto_tile = tiling_json["auto_tile"];
         }
         if (tiling_json.contains("temporal_tiling") && tiling_json["temporal_tiling"].is_boolean()) {
             vae_tiling_params.temporal_tiling = tiling_json["temporal_tiling"];
@@ -2621,10 +2644,12 @@ std::string build_sdcpp_image_metadata_json(const SDContextParams& ctx_params,
     }
 
     if (gen_params.vae_tiling_params.enabled ||
+        !gen_params.vae_tiling_params.auto_tile ||
         gen_params.vae_tiling_params.temporal_tiling ||
         !gen_params.extra_tiling_args.empty()) {
         root["vae_tiling"] = {
             {"enabled", gen_params.vae_tiling_params.enabled},
+            {"auto_tile", gen_params.vae_tiling_params.auto_tile},
             {"temporal_tiling", gen_params.vae_tiling_params.temporal_tiling},
             {"tile_size_x", gen_params.vae_tiling_params.tile_size_x},
             {"tile_size_y", gen_params.vae_tiling_params.tile_size_y},
