@@ -153,7 +153,7 @@ enum lora_apply_mode_t {
 };
 
 typedef struct {
-    bool enabled;
+    bool enabled;  // true => always tile (ON)
     bool temporal_tiling;
     int tile_size_x;
     int tile_size_y;
@@ -161,6 +161,11 @@ typedef struct {
     float rel_size_x;
     float rel_size_y;
     const char* extra_tiling_args;
+    // Tristate with `enabled`: enabled => ON (always tile); else auto_tile => AUTO (tile only when
+    // an untiled VAE compute buffer can't be allocated, e.g. it exceeds the backend's max buffer
+    // size on an iGPU); else OFF (never tile, fail if the untiled buffer doesn't fit). Default AUTO.
+    // Appended (rather than folded into an enum) to keep the struct ABI backward-compatible.
+    bool auto_tile;
 } sd_tiling_params_t;
 
 typedef struct {

@@ -188,7 +188,7 @@ public:
     bool apply_lora_immediately = false;
 
     std::string taesd_path;
-    sd_tiling_params_t vae_tiling_params = {false, false, 0, 0, 0.5f, 0, 0, nullptr};
+    sd_tiling_params_t vae_tiling_params = {false, false, 0, 0, 0.5f, 0, 0, nullptr, true};  // auto_tile=true (AUTO)
     bool offload_params_to_cpu           = false;
     float max_vram                       = 0.f;
     bool stream_layers                   = false;
@@ -2902,7 +2902,7 @@ void sd_img_gen_params_init(sd_img_gen_params_t* sd_img_gen_params) {
     sd_img_gen_params->control_strength  = 0.9f;
     sd_img_gen_params->pm_params         = {nullptr, 0, nullptr, 20.f};
     sd_img_gen_params->pulid_params      = {nullptr, 1.0f};
-    sd_img_gen_params->vae_tiling_params = {false, false, 0, 0, 0.5f, 0.0f, 0.0f, nullptr};
+    sd_img_gen_params->vae_tiling_params = {false, false, 0, 0, 0.5f, 0.0f, 0.0f, nullptr, true};  // auto-fallback default on (#1621)
     sd_cache_params_init(&sd_img_gen_params->cache);
     sd_hires_params_init(&sd_img_gen_params->hires);
 }
@@ -2989,7 +2989,7 @@ void sd_vid_gen_params_init(sd_vid_gen_params_t* sd_vid_gen_params) {
     sd_vid_gen_params->fps                                   = 16;
     sd_vid_gen_params->moe_boundary                          = 0.875f;
     sd_vid_gen_params->vace_strength                         = 1.f;
-    sd_vid_gen_params->vae_tiling_params                     = {false, false, 0, 0, 0.5f, 0.0f, 0.0f, nullptr};
+    sd_vid_gen_params->vae_tiling_params                     = {false, false, 0, 0, 0.5f, 0.0f, 0.0f, nullptr, true};  // auto_tile=true (AUTO)
     sd_vid_gen_params->hires.enabled                         = false;
     sd_vid_gen_params->hires.upscaler                        = SD_HIRES_UPSCALER_LATENT;
     sd_vid_gen_params->hires.scale                           = 2.f;
