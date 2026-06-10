@@ -1694,6 +1694,12 @@ protected:
 
     ggml_context* compute_ctx    = nullptr;
     ggml_gallocr* compute_allocr = nullptr;
+    // Set true when alloc_compute_buffer() deliberately defers to tiling (the
+    // proactive probe found the untiled buffer exceeds the backend's max single
+    // buffer). Lets callers skip the "alloc compute buffer failed" ERROR on this
+    // expected, successfully-handled path (VAE auto-tiling); a genuine OOM from
+    // the real reserve still logs as before.
+    bool compute_buffer_deferred_to_tiling = false;
 
     ggml_context* partial_offload_ctx                   = nullptr;
     ggml_backend_buffer_t partial_runtime_params_buffer = nullptr;
@@ -1901,6 +1907,7 @@ protected:
     }
 
     bool alloc_compute_buffer(ggml_cgraph* gf) {
+        compute_buffer_deferred_to_tiling = false;
         if (compute_allocr != nullptr) {
             return true;
         }
@@ -1926,6 +1933,7 @@ protected:
                               get_desc().c_str(),
                               sizes[0] / 1024.0 / 1024.0,
                               max_size / 1024.0 / 1024.0);
+                    compute_buffer_deferred_to_tiling = true;
                     return false;
                 }
             }
@@ -2683,7 +2691,9 @@ protected:
 
         int64_t t_alloc_begin = ggml_time_ms();
         if (!alloc_compute_buffer(gf)) {
-            LOG_ERROR("%s alloc compute buffer failed", get_desc().c_str());
+            if (!compute_buffer_deferred_to_tiling) {
+                LOG_ERROR("%s alloc compute buffer failed", get_desc().c_str());
+            }
             if (use_partial_param_offload) {
                 restore_partial_params();
             }
@@ -3237,7 +3247,9 @@ public:
             }
         }
         if (!alloc_compute_buffer(gf)) {
-            LOG_ERROR("%s alloc compute buffer failed", get_desc().c_str());
+            if (!compute_buffer_deferred_to_tiling) {
+                LOG_ERROR("%s alloc compute buffer failed", get_desc().c_str());
+            }
             return std::nullopt;
         }
         return execute_graph<T>(gf,
