@@ -306,7 +306,9 @@ public:
         max_vram = sd::ggml_graph_cut::resolve_max_vram_gib(max_vram, backend_for(SDBackendModule::DIFFUSION));
 
         // model_loader is now a member (retained for deferred/sequential DiT loading).
-        seq_load_env = (getenv("CLOUDHANDS_SEQUENTIAL_LOAD") != nullptr);
+        // Opt in via the --sequential-load flag (sd_ctx_params) or the env var
+        // (the env is kept for internal test scripts).
+        seq_load_env = sd_ctx_params->sequential_load || (getenv("CLOUDHANDS_SEQUENTIAL_LOAD") != nullptr);
 
         if (strlen(SAFE_STR(sd_ctx_params->model_path)) > 0) {
             LOG_INFO("loading model from '%s'", sd_ctx_params->model_path);
@@ -2813,6 +2815,7 @@ void sd_ctx_params_init(sd_ctx_params_t* sd_ctx_params) {
     sd_ctx_params->vae_format              = SD_VAE_FORMAT_AUTO;
     sd_ctx_params->backend                 = nullptr;
     sd_ctx_params->params_backend          = nullptr;
+    sd_ctx_params->sequential_load         = false;
     sd_ctx_params->pulid_weights_path      = nullptr;
 }
 
